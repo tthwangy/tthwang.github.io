@@ -243,35 +243,35 @@ static pj_status_t create_answer( pj_pool_t *pool,
 {
   ...
 
-	if (j==initial->media_count) {
-	    /* No matching media.
-	     * Reject the offer by setting the port to zero in the answer.
-	     */
-	    /* For simplicity in the construction of the answer, we'll
-	     * just clone the media from the offer. Anyway receiver will
-	     * ignore anything in the media once it sees that the port
-	     * number is zero.
-	     */
-	    am = sdp_media_clone_deactivate(pool, om, om, answer);
-	} else {
-	    /* The answer is in am */
-	    pj_assert(am != NULL);
+  if (j==initial->media_count) {
+    /* No matching media.
+    * Reject the offer by setting the port to zero in the answer.
+    */
+    /* For simplicity in the construction of the answer, we'll
+    * just clone the media from the offer. Anyway receiver will
+    * ignore anything in the media once it sees that the port
+    * number is zero.
+    */
+    am = sdp_media_clone_deactivate(pool, om, om, answer);
+  } else {
+    /* The answer is in am */
+    pj_assert(am != NULL);
 
-        /* Clone GBT28181 extra lines. */
-        pj_strdup(pool, &am->y, &om->y);
-        pj_strdup(pool, &am->f, &om->f);
-	}
+    /* Clone GBT28181 extra lines. */
+    pj_strdup(pool, &am->y, &om->y);
+    pj_strdup(pool, &am->f, &om->f);
+  }
 
-	/* Add the media answer */
-	answer->media[answer->media_count++] = am;
+  /* Add the media answer */
+  answer->media[answer->media_count++] = am;
 
-	/* Check if this media is active.*/
-	if (am->desc.port != 0)
-	    has_active = PJ_TRUE;
-    }
+  /* Check if this media is active.*/
+  if (am->desc.port != 0)
+    has_active = PJ_TRUE;
+  }
 
-    *p_answer = answer;
+  *p_answer = answer;
 
-    return has_active ? PJ_SUCCESS : status;
+  return has_active ? PJ_SUCCESS : status;
 }
 ```
