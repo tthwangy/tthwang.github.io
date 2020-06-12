@@ -1,0 +1,277 @@
+---
+layout: post
+title:  "pjsip(1) 扩展SDP，添加媒体信息行y、f"
+date:   2020-06-12 18:13:11 +0800
+categories: pjsip gbt28181
+---
+项目以pjsip作为sip协议栈的底层库，为支持国标GBT28181协议，需要扩展参数y、f，但pjsip的sdp不支持额外的参数解析，需要修改源码。  
+
+源码修改涉及的文件：  
+pjmedia/include/pjmedia/sdp.h  
+pjmedia/src/pjmedia/sdp.c  
+pjmedia/src/pjmedia/sdp_neg.c  
+
+### 1、在sdp.h中扩展pjmedia_sdp_media，增加y和f字段
+```c
+struct pjmedia_sdp_media
+{
+    /** Media descriptor line ("m=" line) */
+    struct
+    {
+	pj_str_t    media;		/**< Media type ("audio", "video")  */
+	pj_uint16_t port;		/**< Port number.		    */
+	unsigned    port_count;		/**< Port count, used only when >2  */
+	pj_str_t    transport;		/**< Transport ("RTP/AVP")	    */
+	unsigned    fmt_count;		/**< Number of formats.		    */
+	pj_str_t    fmt[PJMEDIA_MAX_SDP_FMT];       /**< Media formats.	    */
+    } desc;
+
+    pjmedia_sdp_conn   *conn;		/**< Optional connection info.	    */
+    unsigned	        bandw_count;	/**< Number of bandwidth info.	    */
+    pjmedia_sdp_bandw  *bandw[PJMEDIA_MAX_SDP_BANDW]; /**< Bandwidth info.  */
+    unsigned	        attr_count;	/**< Number of attributes.	    */
+    pjmedia_sdp_attr   *attr[PJMEDIA_MAX_SDP_ATTR];   /**< Attributes.	    */
+
+	pj_str_t	y;	/**< y=SSRC, gbt28181 */
+	pj_str_t	f;	/**< f=media desc, gbt28181 */
+};
+```
+
+### 2、在sdp.c中扩展y、f的解析，修改pjmedia_sdp_parse函数
+**添加变量y、f**
+```c
+PJ_DEF(pj_status_t) pjmedia_sdp_parse( pj_pool_t *pool,
+				       char *buf, pj_size_t len,
+				       pjmedia_sdp_session **p_sdp)
+{
+    pj_scanner scanner;
+    pjmedia_sdp_session *session;
+    pjmedia_sdp_media *media = NULL;
+    pjmedia_sdp_attr *attr;
+    pjmedia_sdp_conn *conn;
+    pjmedia_sdp_bandw *bandw;
+    // y,f for gbt28181
+    pj_str_t y;
+    pj_str_t f;
+    pj_str_t dummy;
+    int cur_name = 254;
+    parse_context ctx;
+    PJ_USE_EXCEPTION;
+
+    ...
+}
+```
+**在while循环内添加y、f的解析**
+```c
+PJ_DEF(pj_status_t) pjmedia_sdp_parse( pj_pool_t *pool,
+				       char *buf, pj_size_t len,
+				       pjmedia_sdp_session **p_sdp)
+{
+  ...
+  while (!pj_scan_is_eof(&scanner)) {
+    cur_name = *scanner.curptr;
+    switch (cur_name) {
+      case 'a':
+        ...
+      case 'y':
+        parse_generic_line(&scanner, &y, &ctx);
+        if (media) {
+          pj_strdup(pool, &media->y, &y);
+        }
+        break;
+      case 'f':
+        parse_generic_line(&scanner, &f, &ctx);
+        if (media) {
+          pj_strdup(pool, &media->f, &f);
+        }
+        break;
+      default:
+        if (cur_name >= 'a' && cur_name <= 'z')
+          parse_generic_line(&scanner, &dummy, &ctx);
+        else  {
+          ctx.last_error = PJMEDIA_SDP_EINSDP;
+          on_scanner_error(&scanner);
+        }
+      break;
+    }
+  ...
+}
+```
+
+### 3、修改print_media_desc函数，输出y行和f行
+**新增函数print_y, print_f**  
+为了逻辑通顺，两个函数插入到print_attr函数之后
+```c
+static pj_ssize_t print_attr(const pjmedia_sdp_attr *attr,
+			     char *buf, pj_size_t len)
+{
+    ...
+}
+
+/** print y=SSRC, gbt28181 */
+static pj_ssize_t print_y(const pj_str_t y, char *buf, pj_size_t len)
+{
+    char *p = buf;
+
+    if ((int)len < y.slen + 10)
+    return -1;
+
+    *p++ = 'y';
+    *p++ = '=';
+    pj_memcpy(p, y.ptr, y.slen);
+    p += y.slen;
+
+    *p++ = '\r';
+    *p++ = '\n';
+    return p-buf;
+}
+
+/** print f=media desc, gbt28181 */
+static pj_ssize_t print_f(const pj_str_t f, char *buf, pj_size_t len)
+{
+    char *p = buf;
+
+    if ((int)len < f.slen + 10)
+    return -1;
+
+    *p++ = 'f';
+    *p++ = '=';
+    pj_memcpy(p, f.ptr, f.slen);
+    p += f.slen;
+
+    *p++ = '\r';
+    *p++ = '\n';
+    return p-buf;
+}
+```
+**修改print_media_desc函数**
+```c
+static int print_media_desc( pjmedia_sdp_media *m, char *buf, int len)
+{
+    char *p = buf;
+    char *end = buf+len;
+    unsigned i;
+    int printed;
+
+    ...
+
+    /* print attributes. */
+    for (i=0; i<m->attr_count; ++i) {
+	printed = (int)print_attr(m->attr[i], p, end-p);
+	if (printed < 0) {
+	    return -1;
+	}
+	p += printed;
+    }
+
+    /* print y,f for gbt28181 */
+    if ((int)(m->y.slen) > 0) {
+        printed = (int)print_y(m->y, p, end-p);
+        if (printed < 0) {
+            return -1;
+        }
+        p += printed;
+
+        printed = (int)print_f(m->f, p, end-p);
+        if (printed < 0) {
+            return -1;
+        }
+        p += printed;
+    }
+
+    return (int)(p-buf);
+}
+```
+
+### 4、修改pjmedia_sdp_media_clone函数，增加y和f的复制
+```c
+PJ_DEF(pjmedia_sdp_media*) pjmedia_sdp_media_clone(
+						 pj_pool_t *pool,
+						 const pjmedia_sdp_media *rhs)
+{
+    unsigned int i;
+    pjmedia_sdp_media *m = PJ_POOL_ALLOC_T(pool, pjmedia_sdp_media);
+    PJ_ASSERT_RETURN(m != NULL, NULL);
+
+    pj_strdup (pool, &m->desc.media, &rhs->desc.media);
+    m->desc.port = rhs->desc.port;
+    m->desc.port_count = rhs->desc.port_count;
+    pj_strdup (pool, &m->desc.transport, &rhs->desc.transport);
+    m->desc.fmt_count = rhs->desc.fmt_count;
+    for (i=0; i<rhs->desc.fmt_count; ++i)
+	pj_strdup(pool, &m->desc.fmt[i], &rhs->desc.fmt[i]);
+
+    if (rhs->conn) {
+	m->conn = pjmedia_sdp_conn_clone (pool, rhs->conn);
+	PJ_ASSERT_RETURN(m->conn != NULL, NULL);
+    } else {
+	m->conn = NULL;
+    }
+
+    m->bandw_count = rhs->bandw_count;
+    for (i=0; i < rhs->bandw_count; ++i) {
+	m->bandw[i] = pjmedia_sdp_bandw_clone (pool, rhs->bandw[i]);
+	PJ_ASSERT_RETURN(m->bandw[i] != NULL, NULL);
+    }
+
+    m->attr_count = rhs->attr_count;
+    for (i=0; i < rhs->attr_count; ++i) {
+	m->attr[i] = pjmedia_sdp_attr_clone (pool, rhs->attr[i]);
+	PJ_ASSERT_RETURN(m->attr[i] != NULL, NULL);
+    }
+
+    /* Clone GBT28181 extra lines. */
+    pj_strdup(pool, &m->y, &rhs->y);
+    pj_strdup(pool, &m->f, &rhs->f);
+
+    return m;
+}
+```
+另外pjmedia_sdp_media_clone_deactivate函数，可视情况增加y和f的复制  
+
+**sdp.c 的修改到此为止**
+
+### 5、在sdp_neg.c的SDP协商过程中的create_answerh函数，增加y、f的复制
+```c
+/* Create complete answer for remote's offer. */
+static pj_status_t create_answer( pj_pool_t *pool,
+				  pj_bool_t prefer_remote_codec_order,
+                                  pj_bool_t answer_with_multiple_codecs,
+				  const pjmedia_sdp_session *initial,
+				  const pjmedia_sdp_session *offer,
+				  pjmedia_sdp_session **p_answer)
+{
+  ...
+
+	if (j==initial->media_count) {
+	    /* No matching media.
+	     * Reject the offer by setting the port to zero in the answer.
+	     */
+	    /* For simplicity in the construction of the answer, we'll
+	     * just clone the media from the offer. Anyway receiver will
+	     * ignore anything in the media once it sees that the port
+	     * number is zero.
+	     */
+	    am = sdp_media_clone_deactivate(pool, om, om, answer);
+	} else {
+	    /* The answer is in am */
+	    pj_assert(am != NULL);
+
+        /* Clone GBT28181 extra lines. */
+        pj_strdup(pool, &am->y, &om->y);
+        pj_strdup(pool, &am->f, &om->f);
+	}
+
+	/* Add the media answer */
+	answer->media[answer->media_count++] = am;
+
+	/* Check if this media is active.*/
+	if (am->desc.port != 0)
+	    has_active = PJ_TRUE;
+    }
+
+    *p_answer = answer;
+
+    return has_active ? PJ_SUCCESS : status;
+}
+```
